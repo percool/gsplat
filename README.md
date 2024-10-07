@@ -5,7 +5,7 @@
 
 [http://www.gsplat.studio/](http://www.gsplat.studio/)
 
-gsplat is an open-source library for CUDA accelerated rasterization of gaussians with python bindings. It is inspired by the SIGGRAPH paper [3D Gaussian Splatting for Real-Time Rendering of Radiance Fields](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/), but we’ve made gsplat even faster, more memory efficient, and with a growing list of new features! 
+gsplat is an open-source library for CUDA accelerated rasterization of gaussians with python bindings. It is inspired by the SIGGRAPH paper [3D Gaussian Splatting for Real-Time Rendering of Radiance Fields](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/), but we’ve made gsplat even faster, more memory efficient, and with a growing list of new features!
 
 <div align="center">
   <video src="https://github.com/nerfstudio-project/gsplat/assets/10151885/64c2e9ca-a9a6-4c7e-8d6f-47eeacd15159" width="100%" />
@@ -14,9 +14,6 @@ gsplat is an open-source library for CUDA accelerated rasterization of gaussians
 ## Installation
 
 **Dependence**: Please install [Pytorch](https://pytorch.org/get-started/locally/) first.
-
-
-
 
 The easiest way is to install from PyPI. In this way it will build the CUDA code **on the first run** (JIT).
 
@@ -51,9 +48,23 @@ We provide a set of examples to get you started! Below you can find the details 
 the examples (requires to install some exta dependencies via `pip install -r examples/requirements.txt`)
 
 - [Train a 3D Gaussian splatting model on a COLMAP capture.](https://docs.gsplat.studio/main/examples/colmap.html)
+- ```bash
+  CUDA_VISIBLE_DEVICES=0 python simple_trainer.py default \
+      --data_dir data/360_v2/garden/ --data_factor 4 \
+      --result_dir ./results/garden
+  ```
+- ```bash
+  CUDA_VISIBLE_DEVICES=0 python simple_trainer.py default \
+      --data_dir /home/percool/CLab/ggs/datasets/co3d/apple/189_20393_38136_part/ --data_factor 1 \
+      --result_dir ./results/apple_189_part_1
+  ```
+- ```bash
+  CUDA_VISIBLE_DEVICES=0 python simple_viewer.py \
+        --ckpt results/apple_189_1/ckpts/ckpt_29999_rank0.pt \
+        --port 8081
+  ```
 - [Fit a 2D image with 3D Gaussians.](https://docs.gsplat.studio/main/examples/image.html)
 - [Render a large scene in real-time.](https://docs.gsplat.studio/main/examples/large_scale.html)
-
 
 ## Development and Contribution
 
