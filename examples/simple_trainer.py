@@ -56,7 +56,7 @@ class Config:
     # Path to the Mip-NeRF 360 dataset
     data_dir: str = "data/360_v2/garden"
     # Downsample factor for the dataset
-    data_factor: int = 4
+    data_factor: int = 1 #4
     # Directory to save results
     result_dir: str = "results/garden"
     # Every N images there is a test image
@@ -66,7 +66,7 @@ class Config:
     # A global scaler that applies to the scene size related parameters
     global_scale: float = 1.0
     # Normalize the world space
-    normalize_world_space: bool = True
+    normalize_world_space: bool = False # True
 
     # Port for the viewer server
     port: int = 8080
@@ -270,7 +270,7 @@ class Runner:
         self.local_rank = local_rank
         self.world_size = world_size
         self.device = f"cuda:{local_rank}"
-
+        # breakpoint()
         # Where to dump results.
         os.makedirs(cfg.result_dir, exist_ok=True)
 
@@ -301,7 +301,7 @@ class Runner:
         self.valset = Dataset(self.parser, split="val")
         self.scene_scale = self.parser.scene_scale * 1.1 * cfg.global_scale
         print("Scene scale:", self.scene_scale)
-
+        # breakpoint()
         # Model
         feature_dim = 32 if cfg.app_opt else None
         self.splats, self.optimizers = create_splats_with_optimizers(

@@ -66,7 +66,7 @@ class Parser:
             trans = im.tvec.reshape(3, 1)
             w2c = np.concatenate([np.concatenate([rot, trans], 1), bottom], axis=0)
             w2c_mats.append(w2c)
-
+            # breakpoint()
             # support different camera intrinsics
             camera_id = im.camera_id
             camera_ids.append(camera_id)
@@ -115,9 +115,9 @@ class Parser:
             raise ValueError("No images found in COLMAP.")
         if not (type_ == 0 or type_ == 1):
             print("Warning: COLMAP Camera is not PINHOLE. Images have distortion.")
-
+        # breakpoint()
         w2c_mats = np.stack(w2c_mats, axis=0)
-
+        # breakpoint()
         # Convert extrinsics to camera-to-world.
         camtoworlds = np.linalg.inv(w2c_mats)
 
@@ -129,6 +129,7 @@ class Parser:
         # ensure metrics are reported on the same test set.
         inds = np.argsort(image_names)
         image_names = [image_names[i] for i in inds]
+        # breakpoint()
         camtoworlds = camtoworlds[inds]
         camera_ids = [camera_ids[i] for i in inds]
 
