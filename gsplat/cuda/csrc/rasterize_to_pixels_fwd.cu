@@ -34,7 +34,9 @@ __global__ void rasterize_to_pixels_fwd_kernel(
     const int32_t *__restrict__ flatten_ids,  // [n_isects]
     S *__restrict__ render_colors, // [C, image_height, image_width, COLOR_DIM]
     S *__restrict__ render_alphas, // [C, image_height, image_width, 1]
-    int32_t *__restrict__ last_ids // [C, image_height, image_width]
+    int32_t *__restrict__ last_ids, // [C, image_height, image_width]
+    S *data, int *result, // MY TEST
+    S *__restrict__ render_contribs // MY TEST
 ) {
     // each thread draws one pixel, but also timeshares caching gaussians in a
     // shared tile
@@ -84,7 +86,7 @@ __global__ void rasterize_to_pixels_fwd_kernel(
         (camera_id == C - 1) && (tile_id == tile_width * tile_height - 1)
             ? n_isects
             : tile_offsets[tile_id + 1];
-    const uint32_t block_size = block.size();
+    const uint32_t block_size = block.size(); //256
     uint32_t num_batches =
         (range_end - range_start + block_size - 1) / block_size;
 
@@ -121,6 +123,7 @@ __global__ void rasterize_to_pixels_fwd_kernel(
         // index of gaussian to load
         uint32_t batch_start = range_start + block_size * b;
         uint32_t idx = batch_start + tr;
+        uint32_t g_keep=789;
         if (idx < range_end) {
             int32_t g = flatten_ids[idx]; // flatten index in [C * N] or [nnz]
             id_batch[tr] = g;
@@ -128,6 +131,7 @@ __global__ void rasterize_to_pixels_fwd_kernel(
             const S opac = opacities[g];
             xy_opacity_batch[tr] = {xy.x, xy.y, opac};
             conic_batch[tr] = conics[g];
+            g_keep=g;
         }
 
         // wait for other threads to collect the gaussians in batch
@@ -163,8 +167,22 @@ __global__ void rasterize_to_pixels_fwd_kernel(
             }
             cur_idx = batch_start + t;
 
+            atomicAdd(data+g, vis);
+            atomicAdd(render_contribs+g, vis);
+            // if (t==0||t==5){
+            //     printf("g_keep: %d\t g_keep+t:%d\t cur_idx: %d \t id_batch[t=%d]: %d\t vis:%.3f\n", g_keep,g_keep+t,cur_idx,t,id_batch[t],vis);
+            // }
+
             T = next_T;
         }
+
+        // MY TEST BEGIN
+        int value =1.1;
+        // Atomically add the computed value to the shared result
+        atomicAdd(result, value);
+        // atomicAdd(data+1, value);
+        // MY TEST END
+
     }
 
     if (inside) {
@@ -186,7 +204,7 @@ __global__ void rasterize_to_pixels_fwd_kernel(
 }
 
 template <uint32_t CDIM>
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> call_kernel_with_dim(
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> call_kernel_with_dim(
     // Gaussian parameters
     const torch::Tensor &means2d,   // [C, N, 2] or [nnz, 2]
     const torch::Tensor &conics,    // [C, N, 3] or [nnz, 3]
@@ -224,6 +242,28 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> call_kernel_with_dim(
     uint32_t tile_width = tile_offsets.size(2);
     uint32_t n_isects = flatten_ids.size(0);
 
+    // MY TEST BEGIN
+    int dataSize = N;
+
+    // Allocate memory on the host and device
+    float *d_data;
+    int *d_result;
+    int h_result = 0;
+    float *h_data = (float *)malloc(dataSize * sizeof(float));
+    
+    // Initialize input data
+    for (int i = 0; i < dataSize; i++) {
+        h_data[i] = 0;  // Example: set each element to its index
+    }
+
+    cudaMalloc((void **)&d_data, dataSize * sizeof(float));
+    cudaMalloc((void **)&d_result, sizeof(int));
+
+    // Initialize the result variable to 0 on the device
+    cudaMemcpy(d_result, &h_result, sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_data, h_data, dataSize * sizeof(float), cudaMemcpyHostToDevice);
+    // MY TEST END
+
     // Each block covers a tile on the image. In total there are
     // C * tile_height * tile_width blocks.
     dim3 threads = {tile_size, tile_size, 1};
@@ -240,6 +280,11 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> call_kernel_with_dim(
     torch::Tensor last_ids = torch::empty(
         {C, image_height, image_width}, means2d.options().dtype(torch::kInt32)
     );
+    torch::Tensor contribs = torch::empty(
+        {means2d.size(1)},
+        means2d.options().dtype(torch::kFloat32)
+    ); // MY TEST
+    // printf("means2d.size(1): %d",means2d.size(1));// MY TEST
 
     at::cuda::CUDAStream stream = at::cuda::getCurrentCUDAStream();
     const uint32_t shared_mem =
@@ -282,13 +327,33 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> call_kernel_with_dim(
             flatten_ids.data_ptr<int32_t>(),
             renders.data_ptr<float>(),
             alphas.data_ptr<float>(),
-            last_ids.data_ptr<int32_t>()
+            last_ids.data_ptr<int32_t>(),
+            d_data, d_result,
+            contribs.data_ptr<float>()
         );
 
-    return std::make_tuple(renders, alphas, last_ids);
+    // printf("my test!!!!!!!!!!!!!\n"); // MY TEST. After pip install ., it will print.
+    // MY TEST START
+    // Copy the result back to host
+    cudaMemcpy(&h_result, d_result, sizeof(int), cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_data, d_data, dataSize * sizeof(float), cudaMemcpyDeviceToHost);
+
+    // printf("Accumulated result: %d\n", h_result);
+    // printf("data1: %d\n", h_data[2]);
+    // for (int i = 0; i < dataSize; i++) {
+    //     printf("%.2f ", h_data[i]);
+    //     if (i>5)break;
+    // }
+
+    // Clean up
+    cudaFree(d_data);
+    cudaFree(d_result);
+    // MY TEST END
+
+    return std::make_tuple(renders, alphas, last_ids, contribs);
 }
 
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 rasterize_to_pixels_fwd_tensor(
     // Gaussian parameters
     const torch::Tensor &means2d,   // [C, N, 2] or [nnz, 2]

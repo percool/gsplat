@@ -500,7 +500,7 @@ def rasterization(
             "n_cameras": C,
         }
     )
-
+    # breakpoint()
     # print("rank", world_rank, "Before rasterize_to_pixels")
     if colors.shape[-1] > channel_chunk:
         # slice into chunks
@@ -532,7 +532,7 @@ def rasterization(
         render_colors = torch.cat(render_colors, dim=-1)
         render_alphas = render_alphas[0]  # discard the rest
     else:
-        render_colors, render_alphas = rasterize_to_pixels(
+        render_colors, render_alphas, contribs = rasterize_to_pixels(
             means2d,
             conics,
             colors,
@@ -556,7 +556,7 @@ def rasterization(
             dim=-1,
         )
 
-    return render_colors, render_alphas, meta
+    return render_colors, render_alphas, meta, contribs
 
 
 def _rasterization(
