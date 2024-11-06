@@ -123,7 +123,7 @@ __global__ void rasterize_to_pixels_fwd_kernel(
         // index of gaussian to load
         uint32_t batch_start = range_start + block_size * b;
         uint32_t idx = batch_start + tr;
-        uint32_t g_keep=789;
+        uint32_t g_keep=789; // For Testing
         if (idx < range_end) {
             int32_t g = flatten_ids[idx]; // flatten index in [C * N] or [nnz]
             id_batch[tr] = g;
@@ -131,7 +131,7 @@ __global__ void rasterize_to_pixels_fwd_kernel(
             const S opac = opacities[g];
             xy_opacity_batch[tr] = {xy.x, xy.y, opac};
             conic_batch[tr] = conics[g];
-            g_keep=g;
+            g_keep=g; // For Testing
         }
 
         // wait for other threads to collect the gaussians in batch
@@ -168,7 +168,9 @@ __global__ void rasterize_to_pixels_fwd_kernel(
             cur_idx = batch_start + t;
 
             atomicAdd(data+g, vis);
-            atomicAdd(render_contribs+g, vis);
+            atomicAdd(render_contribs+3*g, vis*vis); // for SUM(vis**2)
+            atomicAdd(render_contribs+3*g+1, vis); // for SUM(vis)
+            atomicAdd(render_contribs+3*g+2, 1); // for used times of each Gaussian
             // if (t==0||t==5){
             //     printf("g_keep: %d\t g_keep+t:%d\t cur_idx: %d \t id_batch[t=%d]: %d\t vis:%.3f\n", g_keep,g_keep+t,cur_idx,t,id_batch[t],vis);
             // }
@@ -281,7 +283,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> call_kern
         {C, image_height, image_width}, means2d.options().dtype(torch::kInt32)
     );
     torch::Tensor contribs = torch::empty(
-        {means2d.size(1)},
+        {means2d.size(1)*3},
         means2d.options().dtype(torch::kFloat32)
     ); // MY TEST
     // printf("means2d.size(1): %d",means2d.size(1));// MY TEST
