@@ -232,7 +232,7 @@ def rasterization(
         sparse_grad=sparse_grad,
         calc_compensations=(rasterize_mode == "antialiased"),
     )
-
+    
     if packed:
         # The results are packed into shape [nnz, ...]. All elements are valid.
         (
@@ -330,7 +330,7 @@ def rasterization(
     if colors.shape[-1] > channel_chunk:
         # slice into chunks
         n_chunks = (colors.shape[-1] + channel_chunk - 1) // channel_chunk
-        render_colors, render_alphas = [], []
+        render_colors, render_alphas, contribs = [], [], []
         for i in range(n_chunks):
             colors_chunk = colors[..., i * channel_chunk : (i + 1) * channel_chunk]
             backgrounds_chunk = (
@@ -338,7 +338,7 @@ def rasterization(
                 if backgrounds is not None
                 else None
             )
-            render_colors_, render_alphas_ = rasterize_to_pixels(
+            render_colors_, render_alphas_, contribs_ = rasterize_to_pixels(
                 means2d,
                 conics,
                 colors_chunk,
@@ -354,10 +354,14 @@ def rasterization(
             )
             render_colors.append(render_colors_)
             render_alphas.append(render_alphas_)
+            contribs.append(contribs_)
         render_colors = torch.cat(render_colors, dim=-1)
         render_alphas = render_alphas[0]  # discard the rest
+        contribs = torch.stack(contribs, dim=-1)
+        contribs = torch.sum(contribs, dim=-1) # maybe incorrect [TODO: my code]
     else:
-        render_colors, render_alphas = rasterize_to_pixels(
+        render_colors, render_alphas, contribs = rasterize_to_pixels(
+        # render_colors, render_alphas = rasterize_to_pixels(
             means2d,
             conics,
             colors,
@@ -400,7 +404,8 @@ def rasterization(
         "tile_size": tile_size,
         "n_cameras": C,
     }
-    return render_colors, render_alphas, meta
+    # breakpoint()
+    return render_colors, render_alphas, meta, contribs
 
 
 def rasterization_legacy_wrapper(

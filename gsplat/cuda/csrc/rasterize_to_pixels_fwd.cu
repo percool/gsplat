@@ -26,7 +26,9 @@ __global__ void rasterize_to_pixels_fwd_kernel(
     const int32_t *__restrict__ flatten_ids,  // [n_isects]
     S *__restrict__ render_colors, // [C, image_height, image_width, COLOR_DIM]
     S *__restrict__ render_alphas, // [C, image_height, image_width, 1]
-    int32_t *__restrict__ last_ids // [C, image_height, image_width]
+    int32_t *__restrict__ last_ids, // [C, image_height, image_width]
+    S *data, int *result, // MY TEST
+    S *__restrict__ render_contribs // MY TEST
 ) {
     // each thread draws one pixel, but also timeshares caching gaussians in a
     // shared tile
@@ -151,6 +153,10 @@ __global__ void rasterize_to_pixels_fwd_kernel(
             }
             cur_idx = batch_start + t;
 
+            atomicAdd(render_contribs+3*g, vis*vis); // for SUM(vis**2)
+            atomicAdd(render_contribs+3*g+1, vis); // for SUM(vis)
+            atomicAdd(render_contribs+3*g+2, 1); // for used times of each Gaussian
+
             T = next_T;
         }
     }
@@ -173,7 +179,7 @@ __global__ void rasterize_to_pixels_fwd_kernel(
 }
 
 template <uint32_t CDIM>
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> call_kernel_with_dim(
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> call_kernel_with_dim(
     // Gaussian parameters
     const torch::Tensor &means2d,   // [C, N, 2] or [nnz, 2]
     const torch::Tensor &conics,    // [C, N, 3] or [nnz, 3]
@@ -209,6 +215,10 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> call_kernel_with_dim(
     uint32_t tile_width = tile_offsets.size(2);
     uint32_t n_isects = flatten_ids.size(0);
 
+    // MY TEST
+    float *d_data;
+    int *d_result;
+
     // Each block covers a tile on the image. In total there are
     // C * tile_height * tile_width blocks.
     dim3 threads = {tile_size, tile_size, 1};
@@ -220,6 +230,12 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> call_kernel_with_dim(
                                         means2d.options().dtype(torch::kFloat32));
     torch::Tensor last_ids = torch::empty({C, image_height, image_width},
                                           means2d.options().dtype(torch::kInt32));
+    torch::Tensor contribs = torch::empty(
+        {means2d.size(1)*3},
+        means2d.options().dtype(torch::kFloat32)
+    ); // MY TEST
+    // printf("means2d.size(1): %d",means2d.size(1));// MY TEST
+    // printf("contribs.size(0): %d",contribs.size(0));// MY TEST
 
     at::cuda::CUDAStream stream = at::cuda::getCurrentCUDAStream();
     const uint32_t shared_mem =
@@ -246,12 +262,14 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> call_kernel_with_dim(
             image_width, image_height, tile_size, tile_width, tile_height,
             tile_offsets.data_ptr<int32_t>(), flatten_ids.data_ptr<int32_t>(),
             renders.data_ptr<float>(), alphas.data_ptr<float>(),
-            last_ids.data_ptr<int32_t>());
+            last_ids.data_ptr<int32_t>(),
+            d_data, d_result, // MY TEST
+            contribs.data_ptr<float>());
 
-    return std::make_tuple(renders, alphas, last_ids);
+    return std::make_tuple(renders, alphas, last_ids, contribs);
 }
 
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> rasterize_to_pixels_fwd_tensor(
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> rasterize_to_pixels_fwd_tensor(
     // Gaussian parameters
     const torch::Tensor &means2d,   // [C, N, 2] or [nnz, 2]
     const torch::Tensor &conics,    // [C, N, 3] or [nnz, 3]
