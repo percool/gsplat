@@ -221,7 +221,8 @@ def rasterization(
     device = means.device
     assert means.shape == (N, 3), means.shape
     assert quats.shape == (N, 4), quats.shape
-    assert scales.shape == (N, 3), scales.shape
+    assert scales.shape == (N, 3), f"Shape of scales: {scales.shape}, N: {N}"
+    # assert scales.shape == (N, 3), scales.shape
     assert opacities.shape == (N,), opacities.shape
     assert viewmats.shape == (C, 4, 4), viewmats.shape
     assert Ks.shape == (C, 3, 3), Ks.shape
