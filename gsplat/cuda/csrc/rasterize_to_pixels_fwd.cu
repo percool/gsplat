@@ -167,7 +167,7 @@ __global__ void rasterize_to_pixels_fwd_kernel(
             }
             cur_idx = batch_start + t;
 
-            atomicAdd(data+g, vis);
+            atomicAdd(data+g, vis*vis);
             atomicAdd(render_contribs+3*g, vis*vis); // for SUM(vis**2)
             atomicAdd(render_contribs+3*g+1, vis); // for SUM(vis)
             atomicAdd(render_contribs+3*g+2, 1); // for used times of each Gaussian
@@ -206,7 +206,7 @@ __global__ void rasterize_to_pixels_fwd_kernel(
 }
 
 template <uint32_t CDIM>
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> call_kernel_with_dim(
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, std::vector<float>> call_kernel_with_dim(
     // Gaussian parameters
     const torch::Tensor &means2d,   // [C, N, 2] or [nnz, 2]
     const torch::Tensor &conics,    // [C, N, 3] or [nnz, 3]
@@ -282,7 +282,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> call_kern
     torch::Tensor last_ids = torch::empty(
         {C, image_height, image_width}, means2d.options().dtype(torch::kInt32)
     );
-    torch::Tensor contribs = torch::empty(
+    torch::Tensor contribs = torch::zeros(
         {means2d.size(1)*3},
         means2d.options().dtype(torch::kFloat32)
     ); // MY TEST
@@ -352,10 +352,10 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> call_kern
     cudaFree(d_result);
     // MY TEST END
 
-    return std::make_tuple(renders, alphas, last_ids, contribs);
+    return std::make_tuple(renders, alphas, last_ids, contribs, std::vector<float>(h_data, h_data + dataSize));
 }
 
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, std::vector<float>>
 rasterize_to_pixels_fwd_tensor(
     // Gaussian parameters
     const torch::Tensor &means2d,   // [C, N, 2] or [nnz, 2]
