@@ -540,13 +540,16 @@ def rasterization(
             render_colors.append(render_colors_)
             render_alphas.append(render_alphas_)
             contribs.append(contribs_)
+            # h_data.append(torch.tensor(h_data_,device=contribs_.device))
             h_data.append(h_data_)
         render_colors = torch.cat(render_colors, dim=-1)
         render_alphas = render_alphas[0]  # discard the rest
-        contribs = torch.stack(contribs, dim=-1)
-        contribs = torch.sum(contribs, dim=-1) # maybe incorrect [TODO: my code]
-        h_data = torch.stack(h_data, dim=-1)
-        h_data = torch.sum(h_data, dim=-1) # maybe incorrect [TODO: my code]
+        contribs = contribs[0] # same for all
+        h_data = h_data[0] # same for all
+        # contribs = torch.stack(contribs, dim=-1)
+        # contribs = torch.sum(contribs, dim=-1) # maybe incorrect [TODO: my code]
+        # h_data = torch.stack(h_data, dim=-1)
+        # h_data = torch.sum(h_data, dim=-1) # maybe incorrect [TODO: my code]
     else:
         render_colors, render_alphas, contribs, h_data = rasterize_to_pixels(
         # render_colors, render_alphas = rasterize_to_pixels(
@@ -563,6 +566,7 @@ def rasterization(
             packed=packed,
             absgrad=absgrad,
         )
+        # h_data=torch.tensor(h_data,device=contribs.device)
     if render_mode in ["ED", "RGB+ED"]:
         # normalize the accumulated depth to get the expected depth
         render_colors = torch.cat(
