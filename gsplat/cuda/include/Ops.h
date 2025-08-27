@@ -220,7 +220,7 @@ std::tuple<at::Tensor, at::Tensor> quat_scale_to_covar_preci_bwd(
 );
 
 // Rasterize 3D Gaussian to pixels
-std::tuple<at::Tensor, at::Tensor, at::Tensor> rasterize_to_pixels_3dgs_fwd(
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> rasterize_to_pixels_3dgs_fwd(
     // Gaussian parameters
     const at::Tensor means2d,   // [..., N, 2] or [nnz, 2]
     const at::Tensor conics,    // [..., N, 3] or [nnz, 3]
@@ -234,7 +234,10 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> rasterize_to_pixels_3dgs_fwd(
     const uint32_t tile_size,
     // intersections
     const at::Tensor tile_offsets, // [..., tile_height, tile_width]
-    const at::Tensor flatten_ids   // [n_isects]
+    const at::Tensor flatten_ids,  // [n_isects]
+    // contribution tracking
+    const uint32_t total_gaussians, // Total number of Gaussians (N) for contribution tracking
+    const at::optional<at::Tensor> gaussian_ids // [nnz] mapping from packed indices to original Gaussian IDs
 );
 std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor>
 rasterize_to_pixels_3dgs_bwd(
@@ -493,7 +496,7 @@ projection_ut_3dgs_fused(
     const FThetaCameraDistortionParameters ftheta_coeffs // shared parameters for all cameras
 );
 
-std::tuple<at::Tensor, at::Tensor, at::Tensor>
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor>
 rasterize_to_pixels_from_world_3dgs_fwd(
     // Gaussian parameters
     const at::Tensor means,     // [..., N, 3]
@@ -522,7 +525,10 @@ rasterize_to_pixels_from_world_3dgs_fwd(
     const FThetaCameraDistortionParameters ftheta_coeffs, // shared parameters for all cameras
     // intersections
     const at::Tensor tile_offsets, // [..., C, tile_height, tile_width]
-    const at::Tensor flatten_ids   // [n_isects]
+    const at::Tensor flatten_ids,  // [n_isects]
+    // contribution tracking
+    const uint32_t total_gaussians, // Total number of Gaussians (N) for contribution tracking
+    const at::optional<at::Tensor> gaussian_ids // [nnz] mapping from packed indices to original Gaussian IDs
 );
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor>

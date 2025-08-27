@@ -554,7 +554,9 @@ def rasterize_to_pixels(
     masks: Optional[Tensor] = None,  # [..., tile_height, tile_width]
     packed: bool = False,
     absgrad: bool = False,
-) -> Tuple[Tensor, Tensor]:
+    total_gaussians: Optional[int] = None,  # Total number of Gaussians for contribution tracking
+    gaussian_ids: Optional[Tensor] = None,  # [nnz] mapping from packed indices to original Gaussian IDs
+) -> Tuple[Tensor, Tensor, Tensor]:
     """Rasterizes Gaussians to pixels.
 
     Args:
@@ -577,6 +579,7 @@ def rasterize_to_pixels(
 
         - **Rendered colors**. [..., image_height, image_width, channels]
         - **Rendered alphas**. [..., image_height, image_width, 1]
+        - **Contributions**. [..., N*3] Contribution tracking for each Gaussian (SUM(vis²), SUM(vis), count)
     """
 
     image_dims = means2d.shape[:-2]
@@ -655,7 +658,16 @@ def rasterize_to_pixels(
         tile_width * tile_size >= image_width
     ), f"Assert Failed: {tile_width} * {tile_size} >= {image_width}"
 
-    render_colors, render_alphas = _RasterizeToPixels.apply(
+    # Determine total number of Gaussians for contribution tracking
+    if total_gaussians is None:
+        if packed:
+            # In packed format, estimate total Gaussians
+            nnz = means2d.size(0)
+            total_gaussians = max(nnz * 4, 100)  # Assume 25% contribute, minimum 100
+        else:
+            total_gaussians = means2d.size(-2)
+    
+    render_colors, render_alphas, contribs = _RasterizeToPixels.apply(
         means2d.contiguous(),
         conics.contiguous(),
         colors.contiguous(),
@@ -668,11 +680,12 @@ def rasterize_to_pixels(
         isect_offsets.contiguous(),
         flatten_ids.contiguous(),
         absgrad,
+        total_gaussians,  # Pass total number of Gaussians
     )
 
     if padded_channels > 0:
         render_colors = render_colors[..., :-padded_channels]
-    return render_colors, render_alphas
+    return render_colors, render_alphas, contribs
 
 
 def rasterize_to_pixels_eval3d(
@@ -700,7 +713,10 @@ def rasterize_to_pixels_eval3d(
     # rolling shutter
     rolling_shutter: RollingShutterType = RollingShutterType.GLOBAL,
     viewmats_rs: Optional[Tensor] = None,  # [..., C, 4, 4]
-) -> Tuple[Tensor, Tensor]:
+    # contribution tracking
+    total_gaussians: Optional[int] = None,  # Total number of Gaussians for contribution tracking
+    gaussian_ids: Optional[Tensor] = None,  # [nnz] mapping from packed indices to original Gaussian IDs
+) -> Tuple[Tensor, Tensor, Tensor]:
     """Rasterizes Gaussians to pixels.
 
     Similar to `rasterize_to_pixels()`, but compute the Gaussian responses in the
@@ -712,6 +728,7 @@ def rasterize_to_pixels_eval3d(
 
         - **Rendered colors**. [..., C, image_height, image_width, channels]
         - **Rendered alphas**. [..., C, image_height, image_width, 1]
+        - **Contributions**. [..., N, 3] Contribution tracking for each Gaussian (SUM(vis²), SUM(vis), count)
     """
     batch_dims = means.shape[:-2]
     num_batch_dims = len(batch_dims)
@@ -817,7 +834,7 @@ def rasterize_to_pixels_eval3d(
         tile_width * tile_size >= image_width
     ), f"Assert Failed: {tile_width} * {tile_size} >= {image_width}"
 
-    render_colors, render_alphas = _RasterizeToPixelsEval3D.apply(
+    render_colors, render_alphas, last_ids, contribs = _RasterizeToPixelsEval3D.apply(
         means.contiguous(),
         quats.contiguous(),
         scales.contiguous(),
@@ -842,11 +859,14 @@ def rasterize_to_pixels_eval3d(
         # rolling shutter
         rolling_shutter,
         viewmats_rs.contiguous() if viewmats_rs is not None else None,
+        # contribution tracking
+        total_gaussians if total_gaussians is not None else N,  # Pass total number of Gaussians
+        gaussian_ids,  # Pass gaussian_ids mapping
     )
 
     if padded_channels > 0:
         render_colors = render_colors[..., :-padded_channels]
-    return render_colors, render_alphas
+    return render_colors, render_alphas, contribs
 
 
 @torch.no_grad()
@@ -1266,8 +1286,10 @@ class _RasterizeToPixels(torch.autograd.Function):
         isect_offsets: Tensor,  # [..., tile_height, tile_width]
         flatten_ids: Tensor,  # [n_isects]
         absgrad: bool,
-    ) -> Tuple[Tensor, Tensor]:
-        render_colors, render_alphas, last_ids = _make_lazy_cuda_func(
+        total_gaussians: int,  # Total number of Gaussians for contribution tracking
+        gaussian_ids: Optional[Tensor] = None,  # [nnz] mapping from packed indices to original Gaussian IDs
+    ) -> Tuple[Tensor, Tensor, Tensor]:
+        render_colors, render_alphas, last_ids, contribs = _make_lazy_cuda_func(
             "rasterize_to_pixels_3dgs_fwd"
         )(
             means2d,
@@ -1281,6 +1303,8 @@ class _RasterizeToPixels(torch.autograd.Function):
             tile_size,
             isect_offsets,
             flatten_ids,
+            total_gaussians,  # Pass the total number of Gaussians
+            gaussian_ids,  # Pass the gaussian_ids mapping
         )
 
         ctx.save_for_backward(
@@ -1302,13 +1326,14 @@ class _RasterizeToPixels(torch.autograd.Function):
 
         # double to float
         render_alphas = render_alphas.float()
-        return render_colors, render_alphas
+        return render_colors, render_alphas, contribs
 
     @staticmethod
     def backward(
         ctx,
         v_render_colors: Tensor,  # [..., H, W, 3]
         v_render_alphas: Tensor,  # [..., H, W, 1]
+        v_contribs: Tensor,  # [..., N, 3]
     ):
         (
             means2d,
@@ -1375,6 +1400,8 @@ class _RasterizeToPixels(torch.autograd.Function):
             None,
             None,
             None,
+            None,  # total_gaussians
+            None,  # gaussian_ids
         )
 
 
@@ -1398,6 +1425,8 @@ class _RasterizeToPixelsEval3D(torch.autograd.Function):
         tile_size: int,
         isect_offsets: Tensor,  # [..., C, tile_height, tile_width]
         flatten_ids: Tensor,  # [..., n_isects]
+        # contribution tracking
+        total_gaussians: int,  # Total number of Gaussians for contribution tracking
         camera_model: Literal["pinhole", "ortho", "fisheye", "ftheta"] = "pinhole",
         ut_params: UnscentedTransformParameters = UnscentedTransformParameters(),
         # distortion
@@ -1408,7 +1437,9 @@ class _RasterizeToPixelsEval3D(torch.autograd.Function):
         # rolling shutter
         rolling_shutter: RollingShutterType = RollingShutterType.GLOBAL,
         viewmats_rs: Optional[Tensor] = None,  # [..., C, 4, 4]
-    ) -> Tuple[Tensor, Tensor]:
+        # gaussian_ids mapping
+        gaussian_ids: Optional[Tensor] = None,  # [nnz] mapping from packed indices to original Gaussian IDs
+    ) -> Tuple[Tensor, Tensor, Tensor]:
         ut_params = ut_params.to_cpp()
         rs_type = rolling_shutter.to_cpp()
         camera_model_type = _make_lazy_cuda_obj(
@@ -1420,7 +1451,7 @@ class _RasterizeToPixelsEval3D(torch.autograd.Function):
             else FThetaCameraDistortionParameters.to_cpp_default()
         )
 
-        render_colors, render_alphas, last_ids = _make_lazy_cuda_func(
+        render_colors, render_alphas, last_ids, contribs = _make_lazy_cuda_func(
             "rasterize_to_pixels_from_world_3dgs_fwd"
         )(
             means,
@@ -1445,6 +1476,8 @@ class _RasterizeToPixelsEval3D(torch.autograd.Function):
             ftheta_coeffs,
             isect_offsets,
             flatten_ids,
+            total_gaussians,  # Pass total number of Gaussians
+            gaussian_ids,  # Pass gaussian_ids mapping
         )
 
         ctx.save_for_backward(
@@ -1474,13 +1507,14 @@ class _RasterizeToPixelsEval3D(torch.autograd.Function):
         ctx.tile_size = tile_size
         ctx.ftheta_coeffs = ftheta_coeffs
 
-        return render_colors, render_alphas
+        return render_colors, render_alphas, contribs
 
     @staticmethod
     def backward(
         ctx,
         v_render_colors: Tensor,  # [..., C, H, W, 3]
         v_render_alphas: Tensor,  # [..., C, H, W, 1]
+        v_contribs: Tensor,  # [..., N, 3]
     ):
         (
             means,
@@ -1573,6 +1607,8 @@ class _RasterizeToPixelsEval3D(torch.autograd.Function):
             None,
             None,
             None,
+            None,  # total_gaussians
+            None,  # gaussian_ids
         )
 
 

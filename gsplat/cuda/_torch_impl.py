@@ -616,7 +616,9 @@ def _rasterize_to_pixels(
     flatten_ids: Tensor,  # [n_isects]
     backgrounds: Optional[Tensor] = None,  # [..., channels]
     batch_per_iter: int = 100,
-):
+    total_gaussians: Optional[int] = None,  # Total number of Gaussians for contribution tracking
+    gaussian_ids: Optional[Tensor] = None,  # [nnz] mapping from packed indices to original Gaussian IDs
+) -> Tuple[Tensor, Tensor, Tensor]:
     """Pytorch implementation of `gsplat.cuda._wrapper.rasterize_to_pixels()`.
 
     This function rasterizes 2D Gaussians to pixels in a Pytorch-friendly way. It
@@ -647,6 +649,16 @@ def _rasterize_to_pixels(
     tile_height = isect_offsets.shape[-2]
     tile_width = isect_offsets.shape[-1]
 
+    # Use total_gaussians if provided, otherwise use N from means2d
+    if total_gaussians is not None:
+        N_total = total_gaussians
+    else:
+        N_total = N
+    
+    # Determine if we're in packed mode
+    # In packed mode, the input tensors have shape [nnz, ...] instead of [..., N, ...]
+    packed = means2d.dim() == 2
+
     assert means2d.shape == image_dims + (N, 2), means2d.shape
     assert conics.shape == image_dims + (N, 3), conics.shape
     assert colors.shape == image_dims + (N, channels), colors.shape
@@ -664,6 +676,9 @@ def _rasterize_to_pixels(
     render_alphas = torch.zeros(
         image_dims + (image_height, image_width, 1), device=device
     )
+    
+    # Create contribution tracking tensor
+    contribs = torch.zeros(image_dims + (N_total, 3), device=device)
 
     # Split Gaussians into batches and iteratively accumulate the renderings
     block_size = tile_size * tile_size
@@ -707,6 +722,30 @@ def _rasterize_to_pixels(
         )
         render_colors = render_colors + renders_step * transmittances[..., None]
         render_alphas = render_alphas + accs_step * transmittances[..., None]
+        
+        # Track contributions for each Gaussian
+        if len(gs_ids) > 0:
+            for i, gs_id in enumerate(gs_ids):
+                # Map gs_id to the correct Gaussian index in the original input order
+                if packed and gaussian_ids is not None:
+                    # In packed mode, gs_id is an index into the packed arrays
+                    # Use the gaussian_ids mapping to get the original Gaussian ID
+                    gauss_id = gaussian_ids[gs_id].item()
+                elif not packed:
+                    # In unpacked mode, gs_id is a global flatten index in [I*N]
+                    # The correct Gaussian ID is gs_id % N
+                    gauss_id = gs_id % N
+                else:
+                    # Fallback: assume sequential mapping
+                    gauss_id = gs_id
+                
+                if gauss_id >= 0 and gauss_id < N_total:  # Ensure valid Gaussian ID
+                    # Get the alpha value for this Gaussian
+                    alpha = accs_step[i] if i < len(accs_step) else 0.0
+                    # Update contribution tracking
+                    contribs[..., gauss_id, 0] += alpha * alpha      # SUM(vis²)
+                    contribs[..., gauss_id, 1] += alpha              # SUM(vis)
+                    contribs[..., gauss_id, 2] += 1.0                # count
 
     render_alphas = render_alphas
     if backgrounds is not None:
@@ -714,7 +753,7 @@ def _rasterize_to_pixels(
             1.0 - render_alphas
         )
 
-    return render_colors, render_alphas
+    return render_colors, render_alphas, contribs
 
 
 def _eval_sh_bases_fast(basis_dim: int, dirs: Tensor):

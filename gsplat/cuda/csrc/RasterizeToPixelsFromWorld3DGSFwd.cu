@@ -53,7 +53,10 @@ __global__ void rasterize_to_pixels_from_world_3dgs_fwd_kernel(
     scalar_t
         *__restrict__ render_colors,      // [B, C, image_height, image_width, CDIM]
     scalar_t *__restrict__ render_alphas, // [B, C, image_height, image_width, 1]
-    int32_t *__restrict__ last_ids        // [B, C, image_height, image_width]
+    int32_t *__restrict__ last_ids,       // [B, C, image_height, image_width]
+    scalar_t *__restrict__ render_contribs, // [B, N, 3] for contribution tracking
+    const uint32_t total_gaussians,       // Total number of Gaussians (N) for contribution tracking
+    const int32_t *__restrict__ gaussian_ids // [nnz] mapping from packed indices to original Gaussian IDs
 ) {
     // each thread draws one pixel, but also timeshares caching gaussians in a
     // shared tile
@@ -266,6 +269,32 @@ __global__ void rasterize_to_pixels_from_world_3dgs_fwd_kernel(
             int32_t isect_id = id_batch[t];
             const float vis = alpha * T;
             const float *c_ptr = colors + isect_id * CDIM;
+            
+            // Track contributions for each Gaussian
+            // Map isect_id to the correct Gaussian index in the original input order
+            if (render_contribs != nullptr) {
+                int32_t gauss_id;
+                if (packed && gaussian_ids != nullptr) {
+                    // In packed mode, isect_id is an index into the packed arrays
+                    // Use the gaussian_ids mapping to get the original Gaussian ID
+                    gauss_id = gaussian_ids[isect_id];
+                } else if (!packed) {
+                    // In unpacked mode, isect_id is a global flatten index in [B*C*N]
+                    // The correct Gaussian ID is isect_id % N
+                    gauss_id = isect_id % N;
+                } else {
+                    // Fallback: assume sequential mapping
+                    gauss_id = isect_id;
+                }
+                
+                // Ensure gauss_id is within bounds
+                if (gauss_id >= 0 && gauss_id < total_gaussians) {
+                    atomicAdd(render_contribs + gauss_id * 3, vis * vis);     // SUM(vis**2)
+                    atomicAdd(render_contribs + gauss_id * 3 + 1, vis);       // SUM(vis)
+                    atomicAdd(render_contribs + gauss_id * 3 + 2, 1.0f);      // count of usage
+                }
+            }
+            
 #pragma unroll
             for (uint32_t k = 0; k < CDIM; ++k) {
                 pix_out[k] += c_ptr[k] * vis;
@@ -326,7 +355,11 @@ void launch_rasterize_to_pixels_from_world_3dgs_fwd_kernel(
     // outputs
     at::Tensor renders, // [..., C, image_height, image_width, channels]
     at::Tensor alphas,  // [..., C, image_height, image_width]
-    at::Tensor last_ids // [..., C, image_height, image_width]
+    at::Tensor last_ids, // [..., C, image_height, image_width]
+    at::Tensor contribs, // [..., N, 3] for contribution tracking
+    // contribution tracking
+    const uint32_t total_gaussians, // Total number of Gaussians (N) for contribution tracking
+    const at::optional<at::Tensor> gaussian_ids // [nnz] mapping from packed indices to original Gaussian IDs
 ) {
     // Note: quats need to be normalized before passing in.
 
@@ -408,7 +441,10 @@ void launch_rasterize_to_pixels_from_world_3dgs_fwd_kernel(
             flatten_ids.data_ptr<int32_t>(),
             renders.data_ptr<float>(),
             alphas.data_ptr<float>(),
-            last_ids.data_ptr<int32_t>()
+            last_ids.data_ptr<int32_t>(),
+            contribs.data_ptr<float>(),
+            total_gaussians,
+            gaussian_ids.has_value() ? gaussian_ids.value().data_ptr<int32_t>() : nullptr
         );
 }
 
@@ -441,7 +477,10 @@ void launch_rasterize_to_pixels_from_world_3dgs_fwd_kernel(
         const at::Tensor flatten_ids,                                          \
         const at::Tensor renders,                                              \
         const at::Tensor alphas,                                               \
-        const at::Tensor last_ids                                               \
+        const at::Tensor last_ids,                                             \
+        const at::Tensor contribs,                                             \
+        const uint32_t total_gaussians,                                        \
+        const at::optional<at::Tensor> gaussian_ids                            \
     );                                                                        
 
 __INS__(1)

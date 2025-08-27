@@ -45,7 +45,7 @@ def rasterization(
     radius_clip: float = 0.0,
     eps2d: float = 0.3,
     sh_degree: Optional[int] = None,
-    packed: bool = True,
+    packed: bool = False,  # Disable packing when contribution tracking is needed
     tile_size: int = 16,
     backgrounds: Optional[Tensor] = None,
     render_mode: Literal["RGB", "D", "ED", "RGB+D", "RGB+ED"] = "RGB",
@@ -67,7 +67,7 @@ def rasterization(
     # rolling shutter
     rolling_shutter: RollingShutterType = RollingShutterType.GLOBAL,
     viewmats_rs: Optional[Tensor] = None,  # [..., C, 4, 4]
-) -> Tuple[Tensor, Tensor, Dict]:
+) -> Tuple[Tensor, Tensor, Dict, Tensor]:
     """Rasterize a set of 3D Gaussians (N) to a batch of image planes (C).
 
     This function provides a handful features for 3D Gaussian rasterization, which
@@ -235,6 +235,9 @@ def rasterization(
         **render_alphas**: The rendered alphas. [..., C, height, width, 1].
 
         **meta**: A dictionary of intermediate results of the rasterization.
+        
+        **contribs**: Contribution tracking for each Gaussian [..., N*3]. Contains for each Gaussian:
+        SUM(visibility²), SUM(visibility), and count of usage.
 
     Examples:
 
@@ -252,15 +255,17 @@ def rasterization(
         >>>    [300., 0., 150.], [0., 300., 100.], [0., 0., 1.]], device=device)[None, :, :]
         >>> width, height = 300, 200
         >>> # render
-        >>> colors, alphas, meta = rasterization(
+        >>> colors, alphas, meta, contribs = rasterization(
         >>>    means, quats, scales, opacities, colors, viewmats, Ks, width, height
         >>> )
-        >>> print (colors.shape, alphas.shape)
-        torch.Size([1, 200, 300, 3]) torch.Size([1, 200, 300, 1])
+        >>> print (colors.shape, alphas.shape, contribs.shape)
+        torch.Size([1, 200, 300, 3]) torch.Size([1, 200, 300, 1]) torch.Size([1, 100, 3])
         >>> print (meta.keys())
         dict_keys(['camera_ids', 'gaussian_ids', 'radii', 'means2d', 'depths', 'conics',
         'opacities', 'tile_width', 'tile_height', 'tiles_per_gauss', 'isect_ids',
         'flatten_ids', 'isect_offsets', 'width', 'height', 'tile_size'])
+        >>> print (f"Contributions shape: {contribs.shape}, tracking SUM(vis²), SUM(vis), count for each of {means.shape[0]} Gaussians")
+        Contributions shape: torch.Size([1, 100, 3]), tracking SUM(vis²), SUM(vis), count for each of 100 Gaussians
 
     """
     meta = {}
@@ -677,7 +682,7 @@ def rasterization(
                 else None
             )
             if with_eval3d:
-                render_colors_, render_alphas_ = rasterize_to_pixels_eval3d(
+                render_colors_, render_alphas_, contribs_ = rasterize_to_pixels_eval3d(
                     means,
                     quats,
                     scales,
@@ -698,9 +703,11 @@ def rasterization(
                     ftheta_coeffs=ftheta_coeffs,
                     rolling_shutter=rolling_shutter,
                     viewmats_rs=viewmats_rs,
+                    total_gaussians=N,  # Pass the total number of Gaussians
+                    gaussian_ids=gaussian_ids if packed else None,  # Pass gaussian_ids mapping for packed mode
                 )
             else:
-                render_colors_, render_alphas_ = rasterize_to_pixels(
+                render_colors_, render_alphas_, contribs_ = rasterize_to_pixels(
                     means2d,
                     conics,
                     colors_chunk,
@@ -713,14 +720,19 @@ def rasterization(
                     backgrounds=backgrounds_chunk,
                     packed=packed,
                     absgrad=absgrad,
+                    total_gaussians=N,  # Pass the total number of Gaussians
+                    gaussian_ids=gaussian_ids if packed else None,  # Pass gaussian_ids mapping for packed mode
                 )
             render_colors.append(render_colors_)
             render_alphas.append(render_alphas_)
+            # contribs is the same across all chunks since it tracks per-Gaussian statistics
+            if 'contribs' not in locals():
+                contribs = contribs_
         render_colors = torch.cat(render_colors, dim=-1)
         render_alphas = render_alphas[0]  # discard the rest
     else:
         if with_eval3d:
-            render_colors, render_alphas = rasterize_to_pixels_eval3d(
+            render_colors, render_alphas, contribs = rasterize_to_pixels_eval3d(
                 means,
                 quats,
                 scales,
@@ -741,9 +753,11 @@ def rasterization(
                 ftheta_coeffs=ftheta_coeffs,
                 rolling_shutter=rolling_shutter,
                 viewmats_rs=viewmats_rs,
+                total_gaussians=N,  # Pass the total number of Gaussians
+                gaussian_ids=gaussian_ids if packed else None,  # Pass gaussian_ids mapping for packed mode
             )
         else:
-            render_colors, render_alphas = rasterize_to_pixels(
+            render_colors, render_alphas, contribs = rasterize_to_pixels(
                 means2d,
                 conics,
                 colors,
@@ -756,6 +770,8 @@ def rasterization(
                 backgrounds=backgrounds,
                 packed=packed,
                 absgrad=absgrad,
+                total_gaussians=N,  # Pass the total number of Gaussians
+                gaussian_ids=gaussian_ids if packed else None,  # Pass gaussian_ids mapping for packed mode
             )
     if render_mode in ["ED", "RGB+ED"]:
         # normalize the accumulated depth to get the expected depth
@@ -767,7 +783,7 @@ def rasterization(
             dim=-1,
         )
 
-    return render_colors, render_alphas, meta
+    return render_colors, render_alphas, meta, contribs
 
 
 def _rasterization(
@@ -790,7 +806,7 @@ def _rasterization(
     rasterize_mode: Literal["classic", "antialiased"] = "classic",
     channel_chunk: int = 32,
     batch_per_iter: int = 100,
-) -> Tuple[Tensor, Tensor, Dict]:
+) -> Tuple[Tensor, Tensor, Dict, Tensor]:
     """A version of rasterization() that utilies on PyTorch's autograd.
 
     .. note::
@@ -942,7 +958,7 @@ def _rasterization(
     if colors.shape[-1] > channel_chunk:
         # slice into chunks
         n_chunks = (colors.shape[-1] + channel_chunk - 1) // channel_chunk
-        render_colors, render_alphas = [], []
+        render_colors, render_alphas, contribs = [], [], None
         for i in range(n_chunks):
             colors_chunk = colors[..., i * channel_chunk : (i + 1) * channel_chunk]
             backgrounds_chunk = (
@@ -950,7 +966,7 @@ def _rasterization(
                 if backgrounds is not None
                 else None
             )
-            render_colors_, render_alphas_ = _rasterize_to_pixels(
+            render_colors_, render_alphas_, contribs_ = _rasterize_to_pixels(
                 means2d,
                 conics,
                 colors_chunk,
@@ -962,13 +978,17 @@ def _rasterization(
                 flatten_ids,
                 backgrounds=backgrounds_chunk,
                 batch_per_iter=batch_per_iter,
+                total_gaussians=N,  # Pass the total number of Gaussians
+                gaussian_ids=gaussian_ids if packed else None,  # Pass gaussian_ids mapping for packed mode
             )
             render_colors.append(render_colors_)
             render_alphas.append(render_alphas_)
+            if contribs is None:
+                contribs = contribs_
         render_colors = torch.cat(render_colors, dim=-1)
         render_alphas = render_alphas[0]  # discard the rest
     else:
-        render_colors, render_alphas = _rasterize_to_pixels(
+        render_colors, render_alphas, contribs = _rasterize_to_pixels(
             means2d,
             conics,
             colors,
@@ -980,6 +1000,8 @@ def _rasterization(
             flatten_ids,
             backgrounds=backgrounds,
             batch_per_iter=batch_per_iter,
+            total_gaussians=N,  # Pass the total number of Gaussians
+            gaussian_ids=gaussian_ids if packed else None,  # Pass gaussian_ids mapping for packed mode
         )
     if render_mode in ["ED", "RGB+ED"]:
         # normalize the accumulated depth to get the expected depth
@@ -1012,7 +1034,7 @@ def _rasterization(
         "n_batches": B,
         "n_cameras": C,
     }
-    return render_colors, render_alphas, meta
+    return render_colors, render_alphas, meta, contribs
 
 
 # def rasterization_legacy_wrapper(

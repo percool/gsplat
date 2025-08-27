@@ -34,7 +34,9 @@ void launch_rasterize_to_pixels_3dgs_fwd_kernel(
     // outputs
     at::Tensor renders, // [..., image_height, image_width, channels]
     at::Tensor alphas,  // [..., image_height, image_width]
-    at::Tensor last_ids // [..., image_height, image_width]
+    at::Tensor last_ids, // [..., image_height, image_width]
+    at::Tensor contribs, // [..., N, 3] for contribution tracking
+    const at::optional<at::Tensor> gaussian_ids // [nnz] mapping from packed indices to original Gaussian IDs
 );
 
 template <uint32_t CDIM>
@@ -228,7 +230,11 @@ void launch_rasterize_to_pixels_from_world_3dgs_fwd_kernel(
     // outputs
     at::Tensor renders, // [..., C, image_height, image_width, channels]
     at::Tensor alphas,  // [..., C, image_height, image_width]
-    at::Tensor last_ids // [..., C, image_height, image_width]
+    at::Tensor last_ids, // [..., C, image_height, image_width]
+    at::Tensor contribs, // [..., N, 3] for contribution tracking
+    // contribution tracking
+    const uint32_t total_gaussians, // Total number of Gaussians (N) for contribution tracking
+    const at::optional<at::Tensor> gaussian_ids // [nnz] mapping from packed indices to original Gaussian IDs
 );
 
 template <uint32_t CDIM>

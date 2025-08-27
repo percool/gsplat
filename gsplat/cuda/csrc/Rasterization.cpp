@@ -17,7 +17,7 @@ namespace gsplat {
 // 3DGS
 ////////////////////////////////////////////////////
 
-std::tuple<at::Tensor, at::Tensor, at::Tensor> rasterize_to_pixels_3dgs_fwd(
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> rasterize_to_pixels_3dgs_fwd(
     // Gaussian parameters
     const at::Tensor means2d,   // [..., N, 2] or [nnz, 2]
     const at::Tensor conics,    // [..., N, 3] or [nnz, 3]
@@ -31,7 +31,10 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> rasterize_to_pixels_3dgs_fwd(
     const uint32_t tile_size,
     // intersections
     const at::Tensor tile_offsets, // [..., tile_height, tile_width]
-    const at::Tensor flatten_ids   // [n_isects]
+    const at::Tensor flatten_ids,  // [n_isects]
+    // contribution tracking
+    const uint32_t total_gaussians, // Total number of Gaussians (N) for contribution tracking
+    const at::optional<at::Tensor> gaussian_ids // [nnz] mapping from packed indices to original Gaussian IDs
 ) {
     DEVICE_GUARD(means2d);
     CHECK_INPUT(means2d);
@@ -63,6 +66,26 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> rasterize_to_pixels_3dgs_fwd(
     last_ids_dims.append({image_height, image_width});
     at::Tensor last_ids = at::empty(last_ids_dims, opt.dtype(at::kInt));
 
+    // Create contribution tracking tensor
+    uint32_t N = total_gaussians; // Use the parameter passed from Python
+    
+    // Safety check: ensure N is valid
+    if (N == 0) {
+        // Fallback: try to get N from other tensors
+        if (colors.size(-2) > 0) {
+            N = colors.size(-2);
+        } else if (conics.size(-2) > 0) {
+            N = conics.size(-2);
+        } else {
+            // If all else fails, create a minimal contribs tensor
+            N = 1;
+        }
+    }
+    
+    at::DimVector contribs_dims(image_dims);
+    contribs_dims.append({N, 3}); // [SUM(vis**2), SUM(vis), count] for each Gaussian
+    at::Tensor contribs = at::zeros(contribs_dims, opt);
+
 #define __LAUNCH_KERNEL__(N)                                                   \
     case N:                                                                    \
         launch_rasterize_to_pixels_3dgs_fwd_kernel<N>(                         \
@@ -79,7 +102,9 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> rasterize_to_pixels_3dgs_fwd(
             flatten_ids,                                                       \
             renders,                                                           \
             alphas,                                                            \
-            last_ids                                                           \
+            last_ids,                                                          \
+            contribs,                                                          \
+            gaussian_ids                                                       \
         );                                                                     \
         break;
 
@@ -111,7 +136,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> rasterize_to_pixels_3dgs_fwd(
     }
 #undef __LAUNCH_KERNEL__
 
-    return std::make_tuple(renders, alphas, last_ids);
+    return std::make_tuple(renders, alphas, last_ids, contribs);
 }
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor>
@@ -692,7 +717,7 @@ std::tuple<at::Tensor, at::Tensor> rasterize_to_indices_2dgs(
 // 3DGS (from world)
 ////////////////////////////////////////////////////
 
-std::tuple<at::Tensor, at::Tensor, at::Tensor> rasterize_to_pixels_from_world_3dgs_fwd(
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor> rasterize_to_pixels_from_world_3dgs_fwd(
     // Gaussian parameters
     const at::Tensor means,     // [..., N, 3]
     const at::Tensor quats,     // [..., N, 4]
@@ -719,7 +744,10 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> rasterize_to_pixels_from_world_3d
     const FThetaCameraDistortionParameters ftheta_coeffs, // shared parameters for all cameras
     // intersections
     const at::Tensor tile_offsets, // [..., C, tile_height, tile_width]
-    const at::Tensor flatten_ids   // [n_isects]
+    const at::Tensor flatten_ids,  // [n_isects]
+    // contribution tracking
+    const uint32_t total_gaussians, // Total number of Gaussians (N) for contribution tracking
+    const at::optional<at::Tensor> gaussian_ids // [nnz] mapping from packed indices to original Gaussian IDs
 ) {
     DEVICE_GUARD(means);
     CHECK_INPUT(means);
@@ -755,6 +783,12 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> rasterize_to_pixels_from_world_3d
     last_ids_shape.append({C, image_height, image_width});
     at::Tensor last_ids = at::empty(last_ids_shape, opt.dtype(at::kInt));
 
+    // Create contribution tracking tensor
+    uint32_t N = means.size(-2); // number of gaussians
+    at::DimVector contribs_shape(batch_dims);
+    contribs_shape.append({N, 3}); // [SUM(vis**2), SUM(vis), count] for each Gaussian
+    at::Tensor contribs = at::zeros(contribs_shape, opt);
+
 #define __LAUNCH_KERNEL__(N)                                                   \
     case N:                                                                    \
         launch_rasterize_to_pixels_from_world_3dgs_fwd_kernel<N>(              \
@@ -782,7 +816,10 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> rasterize_to_pixels_from_world_3d
             flatten_ids,                                                       \
             renders,                                                           \
             alphas,                                                            \
-            last_ids                                                           \
+            last_ids,                                                          \
+            contribs,                                                          \
+            total_gaussians,                                                   \
+            gaussian_ids                                                       \
         );                                                                     \
         break;
 
@@ -814,7 +851,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> rasterize_to_pixels_from_world_3d
     }
 #undef __LAUNCH_KERNEL__
 
-    return std::make_tuple(renders, alphas, last_ids);
+    return std::make_tuple(renders, alphas, last_ids, contribs, gaussian_ids.value_or(at::empty({0}, opt.dtype(at::kInt))));
 };
 
 

@@ -36,7 +36,9 @@ __global__ void rasterize_to_pixels_3dgs_fwd_kernel(
     scalar_t
         *__restrict__ render_colors, // [I, image_height, image_width, CDIM]
     scalar_t *__restrict__ render_alphas, // [I, image_height, image_width, 1]
-    int32_t *__restrict__ last_ids        // [I, image_height, image_width]
+    int32_t *__restrict__ last_ids,       // [I, image_height, image_width]
+    scalar_t *__restrict__ render_contribs, // [I, N*3] for contribution tracking
+    const int32_t *__restrict__ gaussian_ids // [nnz] mapping from packed indices to original Gaussian IDs
 ) {
     // each thread draws one pixel, but also timeshares caching gaussians in a
     // shared tile
@@ -159,6 +161,32 @@ __global__ void rasterize_to_pixels_3dgs_fwd_kernel(
             int32_t g = id_batch[t];
             const float vis = alpha * T;
             const float *c_ptr = colors + g * CDIM;
+            
+            // Track contributions for each Gaussian
+            // Map g to the correct Gaussian index in the original input order
+            if (render_contribs != nullptr) {
+                int32_t gauss_id;
+                if (packed && gaussian_ids != nullptr) {
+                    // In packed mode, g is an index into the packed arrays
+                    // Use the gaussian_ids mapping to get the original Gaussian ID
+                    gauss_id = gaussian_ids[g];
+                } else if (!packed) {
+                    // In unpacked mode, g is a global flatten index in [I*N]
+                    // The correct Gaussian ID is g % N
+                    gauss_id = g % N;
+                } else {
+                    // Fallback: assume sequential mapping
+                    gauss_id = g;
+                }
+                
+                // Ensure gauss_id is within bounds
+                if (gauss_id >= 0 && gauss_id < N) {
+                    atomicAdd(render_contribs + gauss_id * 3, vis * vis);     // SUM(vis**2)
+                    atomicAdd(render_contribs + gauss_id * 3 + 1, vis);       // SUM(vis)
+                    atomicAdd(render_contribs + gauss_id * 3 + 2, 1.0f);      // count of usage
+                }
+            }
+            
 #pragma unroll
             for (uint32_t k = 0; k < CDIM; ++k) {
                 pix_out[k] += c_ptr[k] * vis;
@@ -206,7 +234,9 @@ void launch_rasterize_to_pixels_3dgs_fwd_kernel(
     // outputs
     at::Tensor renders, // [..., image_height, image_width, channels]
     at::Tensor alphas,  // [..., image_height, image_width]
-    at::Tensor last_ids // [..., image_height, image_width]
+    at::Tensor last_ids, // [..., image_height, image_width]
+    at::Tensor contribs, // [..., N, 3] for contribution tracking
+    const at::optional<at::Tensor> gaussian_ids // [nnz] mapping from packed indices to original Gaussian IDs
 ) {
     bool packed = means2d.dim() == 2;
 
@@ -261,7 +291,9 @@ void launch_rasterize_to_pixels_3dgs_fwd_kernel(
             flatten_ids.data_ptr<int32_t>(),
             renders.data_ptr<float>(),
             alphas.data_ptr<float>(),
-            last_ids.data_ptr<int32_t>()
+            last_ids.data_ptr<int32_t>(),
+            contribs.data_ptr<float>(),
+            gaussian_ids.has_value() ? gaussian_ids.value().data_ptr<int32_t>() : nullptr
         );
 }
 
@@ -283,7 +315,9 @@ void launch_rasterize_to_pixels_3dgs_fwd_kernel(
         const at::Tensor flatten_ids,                                          \
         at::Tensor renders,                                                    \
         at::Tensor alphas,                                                     \
-        at::Tensor last_ids                                                    \
+        at::Tensor last_ids,                                                   \
+        at::Tensor contribs,                                                   \
+        const at::optional<at::Tensor> gaussian_ids                            \
     );
 
 __INS__(1)
