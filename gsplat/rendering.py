@@ -783,6 +783,9 @@ def rasterization(
             dim=-1,
         )
 
+    # Reshape contribs from [..., N, 3] to [..., N*3] for flat storage
+    contribs = contribs.reshape(*contribs.shape[:-2], -1)
+
     return render_colors, render_alphas, meta, contribs
 
 
@@ -1034,6 +1037,8 @@ def _rasterization(
         "n_batches": B,
         "n_cameras": C,
     }
+    # Reshape contribs from [..., N, 3] to [..., N*3] for flat storage
+    contribs = contribs.reshape(*contribs.shape[:-2], -1)
     return render_colors, render_alphas, meta, contribs
 
 

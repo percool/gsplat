@@ -753,6 +753,8 @@ def _rasterize_to_pixels(
             1.0 - render_alphas
         )
 
+    # Reshape contribs from [..., N, 3] to [..., N*3] for flat storage
+    contribs = contribs.reshape(*contribs.shape[:-2], -1)
     return render_colors, render_alphas, contribs
 
 

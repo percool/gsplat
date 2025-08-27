@@ -685,6 +685,8 @@ def rasterize_to_pixels(
 
     if padded_channels > 0:
         render_colors = render_colors[..., :-padded_channels]
+    # Reshape contribs from [..., N, 3] to [..., N*3] for flat storage
+    contribs = contribs.reshape(*contribs.shape[:-2], -1)
     return render_colors, render_alphas, contribs
 
 
@@ -866,6 +868,8 @@ def rasterize_to_pixels_eval3d(
 
     if padded_channels > 0:
         render_colors = render_colors[..., :-padded_channels]
+    # Reshape contribs from [..., N, 3] to [..., N*3] for flat storage
+    contribs = contribs.reshape(*contribs.shape[:-2], -1)
     return render_colors, render_alphas, contribs
 
 
@@ -1326,6 +1330,8 @@ class _RasterizeToPixels(torch.autograd.Function):
 
         # double to float
         render_alphas = render_alphas.float()
+        # Reshape contribs from [..., N, 3] to [..., N*3] for flat storage
+        contribs = contribs.reshape(*contribs.shape[:-2], -1)
         return render_colors, render_alphas, contribs
 
     @staticmethod
@@ -1507,6 +1513,8 @@ class _RasterizeToPixelsEval3D(torch.autograd.Function):
         ctx.tile_size = tile_size
         ctx.ftheta_coeffs = ftheta_coeffs
 
+        # Reshape contribs from [..., N, 3] to [..., N*3] for flat storage
+        contribs = contribs.reshape(*contribs.shape[:-2], -1)
         return render_colors, render_alphas, contribs
 
     @staticmethod
