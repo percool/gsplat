@@ -48,7 +48,7 @@ def rasterization(
     packed: bool = False,  # Disable packing when contribution tracking is needed
     tile_size: int = 16,
     backgrounds: Optional[Tensor] = None,
-    render_mode: Literal["RGB", "D", "ED", "RGB+D", "RGB+ED"] = "RGB",
+    render_mode: Literal["RGB", "D", "ED", "RGB+D", "RGB+ED", "RGB+ED+UCD"] = "RGB",
     sparse_grad: bool = False,
     absgrad: bool = False,
     rasterize_mode: Literal["classic", "antialiased"] = "classic",
@@ -290,7 +290,7 @@ def rasterization(
     assert opacities.shape == batch_dims + (N,), opacities.shape
     assert viewmats.shape == batch_dims + (C, 4, 4), viewmats.shape
     assert Ks.shape == batch_dims + (C, 3, 3), Ks.shape
-    assert render_mode in ["RGB", "D", "ED", "RGB+D", "RGB+ED"], render_mode
+    assert render_mode in ["RGB", "D", "ED", "RGB+D", "RGB+ED", "RGB+ED+UCD"], render_mode
 
     def reshape_view(C: int, world_view: torch.Tensor, N_world: list) -> torch.Tensor:
         view_list = list(
@@ -630,6 +630,14 @@ def rasterization(
         colors = depths[..., None]
         if backgrounds is not None:
             backgrounds = torch.zeros(batch_dims + (C, 1), device=backgrounds.device)
+    elif render_mode == "RGB+ED+UCD": # my code
+        # print("render_mode:",render_mode) 
+        colors = torch.cat((colors, depths[..., None], colors[...,:3]**2,(depths**2)[..., None]), dim=-1)
+        # breakpoint()
+        if backgrounds is not None:
+            backgrounds = torch.cat(
+                [backgrounds, torch.zeros(C, 5, device=backgrounds.device)], dim=-1
+            )
     else:  # RGB
         pass
 
@@ -779,6 +787,15 @@ def rasterization(
             [
                 render_colors[..., :-1],
                 render_colors[..., -1:] / render_alphas.clamp(min=1e-10),
+            ],
+            dim=-1,
+        )
+    elif render_mode in ["RGB+ED+UCD"]:
+        # normalize the accumulated depth to get the expected depth
+        render_colors = torch.cat(
+            [
+                render_colors[..., :-5],
+                render_colors[..., -5:] / render_alphas.clamp(min=1e-10),
             ],
             dim=-1,
         )
